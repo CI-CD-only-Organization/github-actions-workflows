@@ -1,0 +1,339 @@
+# Rust CI/CD 再利用可能ワークフロー
+# CLI、Web API、システムプログラミングなどRustプロジェクト全般に対応
+
+name: Rust CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      # Rustバージョン
+      rust-version:
+        description: 'Rustバージョン（stable, beta, nightly, 1.75.0など）'
+        required: false
+        type: string
+        default: 'stable'
+      
+      # ビルドターゲット（クロスコンパイル）
+      build-targets:
+        description: 'ビルドターゲット（カンマ区切り）'
+        required: false
+        type: string
+        default: 'x86_64-unknown-linux-gnu'
+      
+      # テスト設定
+      run-tests:
+        description: 'cargo test を実行'
+        required: false
+        type: boolean
+        default: true
+      
+      run-clippy:
+        description: 'Clippy（リンター）を実行'
+        required: false
+        type: boolean
+        default: true
+      
+      run-fmt-check:
+        description: 'コードフォーマットチェック'
+        required: false
+        type: boolean
+        default: true
+      
+      # ベンチマーク
+      run-benchmarks:
+        description: 'ベンチマークを実行'
+        required: false
+        type: boolean
+        default: false
+      
+      # セキュリティ
+      run-audit:
+        description: 'cargo audit でセキュリティチェック'
+        required: false
+        type: boolean
+        default: true
+      
+      # リリース設定
+      create-release:
+        description: 'GitHub Releaseを作成'
+        required: false
+        type: boolean
+        default: false
+      
+      upload-artifacts:
+        description: 'ビルド成果物をアップロード'
+        required: false
+        type: boolean
+        default: true
+      
+      # ビルドプロファイル
+      build-profile:
+        description: 'ビルドプロファイル（debug, release）'
+        required: false
+        type: string
+        default: 'release'
+      
+      # Cargo features
+      cargo-features:
+        description: '有効にするfeatures（カンマ区切り）'
+        required: false
+        type: string
+        default: 'default'
+      
+      # 作業ディレクトリ
+      working-directory:
+        description: '作業ディレクトリ（モノレポ対応）'
+        required: false
+        type: string
+        default: '.'
+      
+      # ランナー
+      runs-on:
+        description: 'ランナー（self-hosted, ubuntu-latest など）'
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+      
+      # crates.io への公開
+      publish-crate:
+        description: 'crates.io に公開'
+        required: false
+        type: boolean
+        default: false
+    
+    secrets:
+      CARGO_REGISTRY_TOKEN:
+        description: 'crates.io への公開用トークン'
+        required: false
+      
+      GITHUB_TOKEN:
+        description: 'GitHub Release用トークン'
+        required: false
+
+jobs:
+  # コードチェック
+  check:
+    name: Code Check
+    runs-on: ${{ inputs.runs-on }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+          components: rustfmt, clippy
+      
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/registry
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo index
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/git
+          key: ${{ runner.os }}-cargo-index-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Cache cargo build
+        uses: actions/cache@v4
+        with:
+          path: target
+          key: ${{ runner.os }}-cargo-build-target-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run cargo fmt check
+        if: inputs.run-fmt-check
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo fmt --all -- --check
+      
+      - name: Run cargo clippy
+        if: inputs.run-clippy
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ "${{ inputs.cargo-features }}" = "default" ]; then
+            cargo clippy --all-targets -- -D warnings
+          else
+            cargo clippy --all-targets --features ${{ inputs.cargo-features }} -- -D warnings
+          fi
+      
+      - name: Run cargo audit
+        if: inputs.run-audit
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          cargo install cargo-audit
+          cargo audit
+  
+  # テスト
+  test:
+    name: Test
+    runs-on: ${{ inputs.runs-on }}
+    needs: check
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-test-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Run tests
+        if: inputs.run-tests
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          if [ "${{ inputs.cargo-features }}" = "default" ]; then
+            cargo test --all
+          else
+            cargo test --all --features ${{ inputs.cargo-features }}
+          fi
+      
+      - name: Run benchmarks
+        if: inputs.run-benchmarks
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo bench --no-fail-fast
+  
+  # ビルド（マルチターゲット）
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ inputs.runs-on }}
+    needs: test
+    
+    strategy:
+      matrix:
+        target: ${{ fromJson(format('["{0}"]', inputs.build-targets)) }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Parse targets
+        id: parse-targets
+        run: |
+          TARGETS="${{ inputs.build-targets }}"
+          echo "targets=$(echo $TARGETS | jq -R -s -c 'split(",")')" >> $GITHUB_OUTPUT
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ inputs.rust-version }}
+          targets: ${{ matrix.target }}
+      
+      - name: Install cross-compilation tools
+        run: |
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            sudo apt-get update
+            sudo apt-get install -y mingw-w64
+          elif [[ "${{ matrix.target }}" == *"musl"* ]]; then
+            sudo apt-get update
+            sudo apt-get install -y musl-tools
+          fi
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-${{ matrix.target }}-cargo-build-${{ hashFiles('**/Cargo.lock') }}
+      
+      - name: Build binary
+        working-directory: ${{ inputs.working-directory }}
+        run: |
+          PROFILE_FLAG=""
+          if [ "${{ inputs.build-profile }}" = "release" ]; then
+            PROFILE_FLAG="--release"
+          fi
+          
+          FEATURES_FLAG=""
+          if [ "${{ inputs.cargo-features }}" != "default" ]; then
+            FEATURES_FLAG="--features ${{ inputs.cargo-features }}"
+          fi
+          
+          cargo build --target ${{ matrix.target }} $PROFILE_FLAG $FEATURES_FLAG
+      
+      - name: Prepare artifacts
+        if: inputs.upload-artifacts
+        run: |
+          mkdir -p artifacts
+          
+          # バイナリ名を取得（Cargo.tomlから）
+          BINARY_NAME=$(grep '^name = ' ${{ inputs.working-directory }}/Cargo.toml | head -1 | cut -d'"' -f2)
+          
+          # ビルドプロファイルに応じたパス
+          if [ "${{ inputs.build-profile }}" = "release" ]; then
+            BUILD_DIR="target/${{ matrix.target }}/release"
+          else
+            BUILD_DIR="target/${{ matrix.target }}/debug"
+          fi
+          
+          # 実行ファイルをコピー
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            cp "$BUILD_DIR/${BINARY_NAME}.exe" "artifacts/${BINARY_NAME}-${{ matrix.target }}.exe"
+          else
+            cp "$BUILD_DIR/${BINARY_NAME}" "artifacts/${BINARY_NAME}-${{ matrix.target }}"
+            chmod +x "artifacts/${BINARY_NAME}-${{ matrix.target }}"
+          fi
+      
+      - name: Upload artifacts
+        if: inputs.upload-artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.target }}
+          path: artifacts/*
+          retention-days: 30
+  
+  # GitHub Releaseの作成
+  release:
+    name: Create Release
+    if: inputs.create-release && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  # crates.io への公開
+  publish:
+    name: Publish to crates.io
+    if: inputs.publish-crate && github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+      
+      - name: Publish to crates.io
+        working-directory: ${{ inputs.working-directory }}
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
