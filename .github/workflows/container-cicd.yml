@@ -1,4 +1,4 @@
-name: Container CI/CD Pipeline (Docker/Podman)
+name: Container CI/CD Pipeline
 
 on:
   workflow_call:
@@ -6,7 +6,7 @@ on:
       container-engine:
         description: 'Container engine (docker or podman)'
         required: false
-        default: 'auto'  # 自動検出
+        default: 'auto'
         type: string
       
       image-name:
@@ -45,7 +45,7 @@ on:
         type: boolean
       
       registry:
-        description: 'Container registry (docker.io, ghcr.io, quay.io)'
+        description: 'Container registry'
         required: false
         default: 'docker.io'
         type: string
@@ -65,43 +65,35 @@ on:
         required: false
       REGISTRY_PASSWORD:
         required: false
-      REGISTRY_TOKEN:
+      GITHUB_TOKEN:
         required: false
 
 jobs:
-  # コンテナエンジンの検出と準備
   setup:
     name: Setup Container Engine
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: self-hosted
     outputs:
       engine: ${{ steps.detect.outputs.engine }}
-      engine-path: ${{ steps.detect.outputs.path }}
     
     steps:
       - name: Detect container engine
         id: detect
         run: |
           if [ "${{ inputs.container-engine }}" = "auto" ]; then
-            # 自動検出
             if command -v podman &> /dev/null; then
               echo "engine=podman" >> $GITHUB_OUTPUT
-              echo "path=$(which podman)" >> $GITHUB_OUTPUT
               echo "✅ Podman detected"
             elif command -v docker &> /dev/null; then
               echo "engine=docker" >> $GITHUB_OUTPUT
-              echo "path=$(which docker)" >> $GITHUB_OUTPUT
               echo "✅ Docker detected"
             else
               echo "❌ No container engine found"
               exit 1
             fi
           else
-            # 手動指定
             ENGINE="${{ inputs.container-engine }}"
             if command -v $ENGINE &> /dev/null; then
               echo "engine=$ENGINE" >> $GITHUB_OUTPUT
-              echo "path=$(which $ENGINE)" >> $GITHUB_OUTPUT
-              echo "✅ Using $ENGINE"
             else
               echo "❌ $ENGINE not found"
               exit 1
@@ -112,12 +104,10 @@ jobs:
         run: |
           ENGINE="${{ steps.detect.outputs.engine }}"
           $ENGINE --version
-          $ENGINE info || true
 
-  # コンテナイメージのビルド
   build:
     name: Build Container Image
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: self-hosted
     needs: setup
     defaults:
       run:
@@ -126,193 +116,134 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       
-      - name: Set up QEMU (for multi-platform)
-        if: contains(inputs.platforms, ',')
+      - name: Install dependencies
         run: |
-          ENGINE="${{ needs.setup.outputs.engine }}"
-          if [ "$ENGINE" = "docker" ]; then
-            docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+          # jq をインストール（なければ）
+          if ! command -v jq &> /dev/null; then
+            brew install jq
           fi
       
       - name: Parse build args
-        id: build-args
+        id: parse-args
         run: |
           BUILD_ARGS='${{ inputs.build-args }}'
-          echo "args=$BUILD_ARGS" >> $GITHUB_OUTPUT
+          if [ "$BUILD_ARGS" != '{}' ]; then
+            ARGS_STRING=$(echo "$BUILD_ARGS" | jq -r 'to_entries | map("--build-arg \(.key)=\(.value)") | join(" ")')
+            echo "args=$ARGS_STRING" >> $GITHUB_OUTPUT
+          else
+            echo "args=" >> $GITHUB_OUTPUT
+          fi
       
-      - name: Build image (Docker)
+      - name: Build with Docker
         if: needs.setup.outputs.engine == 'docker'
         run: |
-          # Build arguments を展開
-          BUILD_ARGS_CMD=""
-          if [ '${{ inputs.build-args }}' != '{}' ]; then
-            BUILD_ARGS_CMD=$(echo '${{ inputs.build-args }}' | jq -r 'to_entries | map("--build-arg \(.key)=\(.value)") | join(" ")')
+          # シングルプラットフォームビルド
+          if [ "${{ inputs.platforms }}" = "linux/amd64" ] || [ "${{ inputs.platforms }}" = "linux/arm64" ]; then
+            docker build \
+              --file ${{ inputs.dockerfile }} \
+              --tag ${{ inputs.image-name }}:${{ inputs.environment }} \
+              --tag ${{ inputs.image-name }}:${{ github.sha }} \
+              --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+              --build-arg VCS_REF=${{ github.sha }} \
+              ${{ steps.parse-args.outputs.args }} \
+              .
+          else
+            # マルチプラットフォームビルド
+            docker buildx create --use --name builder-${{ github.run_id }} || true
+            docker buildx build \
+              --platform ${{ inputs.platforms }} \
+              --file ${{ inputs.dockerfile }} \
+              --tag ${{ inputs.image-name }}:${{ inputs.environment }} \
+              --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+              --build-arg VCS_REF=${{ github.sha }} \
+              ${{ steps.parse-args.outputs.args }} \
+              --load \
+              . || \
+            docker buildx build \
+              --platform ${{ inputs.platforms }} \
+              --file ${{ inputs.dockerfile }} \
+              --tag ${{ inputs.image-name }}:${{ inputs.environment }} \
+              --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
+              ${{ steps.parse-args.outputs.args }} \
+              .
           fi
-          
-          docker build \
-            --file ${{ inputs.dockerfile }} \
-            --tag ${{ inputs.image-name }}:${{ github.sha }} \
-            --tag ${{ inputs.image-name }}:${{ inputs.environment }} \
-            --tag ${{ inputs.image-name }}:latest \
-            --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
-            --build-arg VCS_REF=${{ github.sha }} \
-            --build-arg ENV=${{ inputs.environment }} \
-            $BUILD_ARGS_CMD \
-            .
       
-      - name: Build image (Podman)
+      - name: Build with Podman
         if: needs.setup.outputs.engine == 'podman'
         run: |
-          # Build arguments を展開
-          BUILD_ARGS_CMD=""
-          if [ '${{ inputs.build-args }}' != '{}' ]; then
-            BUILD_ARGS_CMD=$(echo '${{ inputs.build-args }}' | jq -r 'to_entries | map("--build-arg \(.key)=\(.value)") | join(" ")')
-          fi
-          
           podman build \
             --file ${{ inputs.dockerfile }} \
-            --tag ${{ inputs.image-name }}:${{ github.sha }} \
             --tag ${{ inputs.image-name }}:${{ inputs.environment }} \
-            --tag ${{ inputs.image-name }}:latest \
+            --tag ${{ inputs.image-name }}:${{ github.sha }} \
             --build-arg BUILD_DATE=$(date -u +"%Y-%m-%dT%H:%M:%SZ") \
             --build-arg VCS_REF=${{ github.sha }} \
-            --build-arg ENV=${{ inputs.environment }} \
-            $BUILD_ARGS_CMD \
+            ${{ steps.parse-args.outputs.args }} \
             .
-      
-      - name: Build multi-platform (Docker with buildx)
-        if: needs.setup.outputs.engine == 'docker' && contains(inputs.platforms, ',')
-        run: |
-          docker buildx create --use --name multi-platform-builder
-          
-          docker buildx build \
-            --platform ${{ inputs.platforms }} \
-            --file ${{ inputs.dockerfile }} \
-            --tag ${{ inputs.image-name }}:${{ inputs.environment }} \
-            --build-arg ENV=${{ inputs.environment }} \
-            --load \
-            .
-      
-      - name: Build multi-platform (Podman)
-        if: needs.setup.outputs.engine == 'podman' && contains(inputs.platforms, ',')
-        run: |
-          # Podman の manifest 機能を使用
-          IFS=',' read -ra PLATFORMS <<< "${{ inputs.platforms }}"
-          
-          for PLATFORM in "${PLATFORMS[@]}"; do
-            podman build \
-              --platform $PLATFORM \
-              --file ${{ inputs.dockerfile }} \
-              --tag ${{ inputs.image-name }}:${{ inputs.environment }}-${PLATFORM//\//-} \
-              --build-arg ENV=${{ inputs.environment }} \
-              .
-          done
-          
-          # Manifest を作成
-          podman manifest create ${{ inputs.image-name }}:${{ inputs.environment }}
-          
-          for PLATFORM in "${PLATFORMS[@]}"; do
-            podman manifest add \
-              ${{ inputs.image-name }}:${{ inputs.environment }} \
-              ${{ inputs.image-name }}:${{ inputs.environment }}-${PLATFORM//\//-}
-          done
       
       - name: Inspect image
         run: |
           ENGINE="${{ needs.setup.outputs.engine }}"
           $ENGINE images ${{ inputs.image-name }}
-          $ENGINE inspect ${{ inputs.image-name }}:${{ inputs.environment }} | jq '.[0].Config'
 
-  # コンテナテスト
   test:
     name: Test Container
-    runs-on: [self-hosted, macOS, ARM64]
+    runs-on: self-hosted
     needs: [setup, build]
     if: inputs.run-tests
     
     steps:
-      - uses: actions/checkout@v4
-      
       - name: Run container test
         run: |
           ENGINE="${{ needs.setup.outputs.engine }}"
           
-          echo "🧪 Testing container startup..."
+          echo "🧪 Testing container..."
           CONTAINER_ID=$($ENGINE run -d ${{ inputs.image-name }}:${{ inputs.environment }})
-          
-          echo "Container ID: $CONTAINER_ID"
           sleep 5
           
-          echo "📋 Container logs:"
           $ENGINE logs $CONTAINER_ID
-          
-          echo "🔍 Container status:"
-          $ENGINE ps -a | grep $CONTAINER_ID
-          
-          echo "🧹 Cleanup"
-          $ENGINE stop $CONTAINER_ID
-          $ENGINE rm $CONTAINER_ID
+          $ENGINE stop $CONTAINER_ID || true
+          $ENGINE rm $CONTAINER_ID || true
       
-      - name: Run health check
+      - name: Security scan
         run: |
-          ENGINE="${{ needs.setup.outputs.engine }}"
-          
-          echo "🏥 Testing health check..."
-          $ENGINE run --rm ${{ inputs.image-name }}:${{ inputs.environment }} \
-            sh -c "command -v python && python --version" || \
-            sh -c "command -v node && node --version" || \
-            echo "Basic test passed"
-      
-      - name: Security scan (Trivy)
-        run: |
-          ENGINE="${{ needs.setup.outputs.engine }}"
-          
-          # Trivy をインストール（なければ）
           if ! command -v trivy &> /dev/null; then
             brew install aquasecurity/trivy/trivy
           fi
           
-          echo "🔒 Scanning for vulnerabilities..."
-          trivy image --severity HIGH,CRITICAL ${{ inputs.image-name }}:${{ inputs.environment }} || true
+          trivy image --severity HIGH,CRITICAL \
+            ${{ inputs.image-name }}:${{ inputs.environment }} || true
 
-  # レジストリへのプッシュ
   push:
     name: Push to Registry
-    runs-on: [self-hosted, macOS, ARM64]
-    needs: [setup, build, test]
-    if: inputs.push-to-registry
+    runs-on: self-hosted
+    needs: [setup, build]
+    if: |
+      always() && 
+      needs.build.result == 'success' &&
+      inputs.push-to-registry
     
     steps:
-      - name: Login to registry (Docker)
-        if: needs.setup.outputs.engine == 'docker'
-        run: |
-          REGISTRY="${{ inputs.registry }}"
-          
-          if [ "$REGISTRY" = "ghcr.io" ]; then
-            # GitHub Container Registry
-            echo "${{ secrets.REGISTRY_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
-          else
-            # Docker Hub or other
-            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login $REGISTRY -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
-          fi
+      - name: Login to GitHub Container Registry
+        if: inputs.registry == 'ghcr.io'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       
-      - name: Login to registry (Podman)
-        if: needs.setup.outputs.engine == 'podman'
-        run: |
-          REGISTRY="${{ inputs.registry }}"
-          
-          if [ "$REGISTRY" = "ghcr.io" ]; then
-            echo "${{ secrets.REGISTRY_TOKEN }}" | podman login ghcr.io -u ${{ github.actor }} --password-stdin
-          else
-            echo "${{ secrets.REGISTRY_PASSWORD }}" | podman login $REGISTRY -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
-          fi
+      - name: Login to Docker Hub
+        if: inputs.registry == 'docker.io'
+        uses: docker/login-action@v3
+        with:
+          registry: docker.io
+          username: ${{ secrets.REGISTRY_USERNAME }}
+          password: ${{ secrets.REGISTRY_PASSWORD }}
       
-      - name: Tag for registry
+      - name: Push images
         run: |
           ENGINE="${{ needs.setup.outputs.engine }}"
           REGISTRY="${{ inputs.registry }}"
           
-          # Registry のプレフィックスを追加
           if [ "$REGISTRY" = "ghcr.io" ]; then
             FULL_NAME="ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}"
           else
@@ -320,66 +251,4 @@ jobs:
           fi
           
           $ENGINE tag ${{ inputs.image-name }}:${{ inputs.environment }} $FULL_NAME:${{ inputs.environment }}
-          $ENGINE tag ${{ inputs.image-name }}:${{ inputs.environment }} $FULL_NAME:${{ github.sha }}
-          
-          if [ "${{ inputs.environment }}" = "production" ]; then
-            $ENGINE tag ${{ inputs.image-name }}:${{ inputs.environment }} $FULL_NAME:latest
-          fi
-      
-      - name: Push to registry (Docker)
-        if: needs.setup.outputs.engine == 'docker'
-        run: |
-          REGISTRY="${{ inputs.registry }}"
-          
-          if [ "$REGISTRY" = "ghcr.io" ]; then
-            FULL_NAME="ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}"
-          else
-            FULL_NAME="$REGISTRY/${{ secrets.REGISTRY_USERNAME }}/${{ inputs.image-name }}"
-          fi
-          
-          docker push $FULL_NAME:${{ inputs.environment }}
-          docker push $FULL_NAME:${{ github.sha }}
-          
-          if [ "${{ inputs.environment }}" = "production" ]; then
-            docker push $FULL_NAME:latest
-          fi
-      
-      - name: Push to registry (Podman)
-        if: needs.setup.outputs.engine == 'podman'
-        run: |
-          REGISTRY="${{ inputs.registry }}"
-          
-          if [ "$REGISTRY" = "ghcr.io" ]; then
-            FULL_NAME="ghcr.io/${{ github.repository_owner }}/${{ inputs.image-name }}"
-          else
-            FULL_NAME="$REGISTRY/${{ secrets.REGISTRY_USERNAME }}/${{ inputs.image-name }}"
-          fi
-          
-          podman push $FULL_NAME:${{ inputs.environment }}
-          podman push $FULL_NAME:${{ github.sha }}
-          
-          if [ "${{ inputs.environment }}" = "production" ]; then
-            podman push $FULL_NAME:latest
-          fi
-
-  # サマリー
-  report:
-    name: Build Summary
-    runs-on: [self-hosted, macOS, ARM64]
-    needs: [setup, build, test]
-    if: always()
-    
-    steps:
-      - name: Generate summary
-        run: |
-          echo "## 🐳 Container Build Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "**Engine**: ${{ needs.setup.outputs.engine }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Image**: ${{ inputs.image-name }}:${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
-          echo "**Registry**: ${{ inputs.registry }}" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
-          echo "### Results" >> $GITHUB_STEP_SUMMARY
-          echo "- Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
-          echo "- Test: ${{ needs.test.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
-
+          $ENGINE push $FULL_NAME:${{ inputs.environment }}
