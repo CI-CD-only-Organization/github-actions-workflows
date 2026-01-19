@@ -1,0 +1,120 @@
+# C++ Embedded & Real-time Systems Example
+# 組み込み・リアルタイムシステム向け最適化
+# RAM/ROM節約、RTTI/例外無効化、決定論的動作
+
+name: C++ Embedded & Real-time CI/CD
+
+on:
+  push:
+    branches: [main, develop, embedded/*]
+  pull_request:
+  release:
+    types: [created]
+
+jobs:
+  # 組み込みビルド（サイズ最適化）
+  build-embedded:
+    uses: tomoya-cicd/github-actions-workflows/.github/workflows/c-cpp-cicd.yml@main
+    
+    with:
+      # 言語設定
+      language: 'cpp'
+      cpp-standard: 'c++17'  # 組み込みでもモダンC++
+      
+      # コンパイラ
+      compiler: 'clang'  # LLVMバックエンドでサイズ最適化
+      
+      # ビルドシステム
+      build-system: 'cmake'
+      cmake-options: |
+        -DCMAKE_BUILD_TYPE=MinSizeRel
+        -DENABLE_RTTI=OFF
+        -DENABLE_EXCEPTIONS=OFF
+        -DENABLE_STATIC_LINKING=ON
+        -DCMAKE_CXX_FLAGS="-fno-rtti -fno-exceptions -ffunction-sections -fdata-sections"
+        -DCMAKE_EXE_LINKER_FLAGS="-Wl,--gc-sections"
+        -DTARGET_EMBEDDED=ON
+      
+      # 最適化レベル
+      optimization-level: 'Os'  # サイズ最適化
+      
+      # テスト（ホスト環境でのみ実行）
+      run-tests: true
+      test-command: 'ctest --output-on-failure'
+      
+      # 静的解析（組み込みでは重要）
+      run-static-analysis: true
+      run-valgrind: true  # メモリリーク検出
+      
+      # クロスコンパイル
+      # build-targets: 'linux-arm64,linux-armv7'
+      
+      # ドキュメント
+      generate-docs: false
+      
+      # ランナー
+      runs-on: 'self-hosted'  # Mac Studio
+  
+  # リアルタイム性能測定
+  realtime-benchmark:
+    needs: build-embedded
+    runs-on: self-hosted
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-native
+      
+      - name: Run real-time benchmarks
+        run: |
+          echo "## ⏱️ Real-time Performance Metrics" >> $GITHUB_STEP_SUMMARY
+          
+          # バイナリサイズ測定
+          echo "### Binary Size" >> $GITHUB_STEP_SUMMARY
+          ls -lh build/*.elf build/*.bin 2>/dev/null | awk '{print "- "$9": "$5}' >> $GITHUB_STEP_SUMMARY || true
+          
+          # スタック使用量解析
+          if command -v stack-usage-analyzer &> /dev/null; then
+            echo "### Stack Usage" >> $GITHUB_STEP_SUMMARY
+            stack-usage-analyzer build/*.su >> $GITHUB_STEP_SUMMARY || true
+          fi
+          
+          # 実行時間測定
+          if [ -x "build/benchmark" ]; then
+            echo "### Execution Time" >> $GITHUB_STEP_SUMMARY
+            ./build/benchmark --format=github >> $GITHUB_STEP_SUMMARY
+          fi
+  
+  # メモリフットプリント解析
+  memory-analysis:
+    needs: build-embedded
+    runs-on: self-hosted
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-native
+      
+      - name: Analyze memory footprint
+        run: |
+          echo "## 💾 Memory Footprint Analysis" >> $GITHUB_STEP_SUMMARY
+          
+          # セクションサイズ表示
+          for binary in build/*.elf build/*.out; do
+            if [ -f "$binary" ]; then
+              echo "### $(basename $binary)" >> $GITHUB_STEP_SUMMARY
+              size "$binary" | tail -1 | awk '{printf "- .text: %s bytes\n- . %s bytes\n- .bss: %s bytes\n- **Total**: %s bytes\n", $1, $2, $3, $4}' >> $GITHUB_STEP_SUMMARY
+            fi
+          done
+          
+          # RAM/ROM使用量計算
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Resource Usage" >> $GITHUB_STEP_SUMMARY
+          echo "- ROM: .text + .data" >> $GITHUB_STEP_SUMMARY
+          echo "- RAM: .data + .bss" >> $GITHUB_STEP_SUMMARY
