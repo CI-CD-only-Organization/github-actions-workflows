@@ -1,0 +1,74 @@
+# Flutter CI/CD ワークフローの使用例
+# このファイルを .github/workflows/ にコピーして使用してください
+
+name: Flutter CI/CD Example
+
+# トリガー設定
+on:
+  # mainブランチへのpush時に実行
+  push:
+    branches: [main, develop]
+  
+  # Pull Request作成時に実行
+  pull_request:
+    branches: [main]
+  
+  # 手動実行を許可
+  workflow_dispatch:
+    inputs:
+      deploy_web:
+        description: 'Web版をデプロイするか'
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  # 再利用可能なワークフローを呼び出し
+  build-and-deploy:
+    # CI-CD-only-Organizationの共通ワークフローを使用
+    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/flutter-cicd.yml@main
+    
+    with:
+      # Flutterのバージョン指定（省略時は最新安定版）
+      flutter-version: '3.27.1'
+      
+      # ビルドターゲットの設定
+      build-ios: true          # iOSアプリをビルド
+      build-android: true      # Androidアプリをビルド
+      build-macos: false       # macOSアプリをビルド（デフォルト: false）
+      build-windows: false     # Windowsアプリをビルド（デフォルト: false）
+      build-linux: false       # Linuxアプリをビルド（デフォルト: false）
+      
+      # Web版の設定
+      deploy-web: true         # Web版をデプロイ
+      web-deploy-target: 'cloudflare-pages'  # デプロイ先（cloudflare-pages, vercel, netlify, firebase, github-pages）
+      
+      # テスト設定
+      run-tests: true          # ユニットテストを実行
+      test-coverage: true      # カバレッジレポートを生成
+      
+      # 環境指定
+      environment: 'production'  # デプロイ環境（production, staging, development）
+      
+      # セルフホストランナーの使用（Mac Studio利用時）
+      runs-on: 'self-hosted'   # GitHub-hostedの場合は 'ubuntu-latest', 'macos-latest' など
+    
+    secrets:
+      # Cloudflare Pages デプロイ用
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      
+      # App Store Connect（iOS配布用）
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_PROVISIONING_PROFILE_BASE64: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
+      APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+      APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+      APPLE_API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+      
+      # Google Play Console（Android配布用）
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+      ANDROID_KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+      ANDROID_KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+      ANDROID_KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
