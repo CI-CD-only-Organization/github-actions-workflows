@@ -1,0 +1,583 @@
+name: Web Application CI/CD Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      # フレームワーク設定
+      framework:
+        description: 'Web framework (react, vue, nextjs, nuxtjs, svelte, astro, vite, custom)'
+        required: false
+        default: 'react'
+        type: string
+      
+      node-version:
+        description: 'Node.js version'
+        required: false
+        default: '20'
+        type: string
+      
+      package-manager:
+        description: 'Package manager (npm, yarn, pnpm, bun)'
+        required: false
+        default: 'npm'
+        type: string
+      
+      # ビルド設定
+      build-command:
+        description: 'Build command'
+        required: false
+        default: 'npm run build'
+        type: string
+      
+      build-directory:
+        description: 'Build output directory'
+        required: false
+        default: 'dist'
+        type: string
+      
+      # CI設定
+      run-linter:
+        description: 'Run linter'
+        required: false
+        default: true
+        type: boolean
+      
+      run-tests:
+        description: 'Run tests'
+        required: false
+        default: true
+        type: boolean
+      
+      run-e2e-tests:
+        description: 'Run E2E tests'
+        required: false
+        default: false
+        type: boolean
+      
+      # CD設定
+      deploy-provider:
+        description: 'Deploy provider (cloudflare, vercel, netlify, firebase, github-pages, none)'
+        required: false
+        default: 'none'
+        type: string
+      
+      deploy-preview:
+        description: 'Deploy preview for PRs'
+        required: false
+        default: true
+        type: boolean
+      
+      deploy-production:
+        description: 'Deploy to production'
+        required: false
+        default: false
+        type: boolean
+      
+      # その他
+      working-directory:
+        description: 'Working directory'
+        required: false
+        default: '.'
+        type: string
+      
+      environment:
+        description: 'Environment (dev, staging, production)'
+        required: false
+        default: 'dev'
+        type: string
+      
+      base-url:
+        description: 'Base URL for deployment'
+        required: false
+        default: ''
+        type: string
+    
+    secrets:
+      # Cloudflare
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      CLOUDFLARE_ACCOUNT_ID:
+        required: false
+      
+      # Vercel
+      VERCEL_TOKEN:
+        required: false
+      VERCEL_ORG_ID:
+        required: false
+      VERCEL_PROJECT_ID:
+        required: false
+      
+      # Netlify
+      NETLIFY_AUTH_TOKEN:
+        required: false
+      NETLIFY_SITE_ID:
+        required: false
+      
+      # Firebase
+      FIREBASE_TOKEN:
+        required: false
+      
+      # 環境変数
+      ENV_VARS:
+        required: false
+
+jobs:
+  # ==================== CI: コード品質チェック ====================
+  lint:
+    name: Lint & Code Quality
+    runs-on: [self-hosted, macOS, ARM64]
+    if: inputs.run-linter
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.working-directory }}/package-lock.json
+      
+      - name: Install pnpm
+        if: inputs.package-manager == 'pnpm'
+        run: npm install -g pnpm
+      
+      - name: Install bun
+        if: inputs.package-manager == 'bun'
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm)
+              npm ci
+              ;;
+            yarn)
+              yarn install --frozen-lockfile
+              ;;
+            pnpm)
+              pnpm install --frozen-lockfile
+              ;;
+            bun)
+              bun install --frozen-lockfile
+              ;;
+          esac
+      
+      - name: Run ESLint
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm run lint ;;
+            yarn) yarn lint ;;
+            pnpm) pnpm lint ;;
+            bun) bun run lint ;;
+          esac
+        continue-on-error: true
+      
+      - name: Run Prettier check
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm run format:check || npx prettier --check . ;;
+            yarn) yarn format:check || yarn prettier --check . ;;
+            pnpm) pnpm format:check || pnpm prettier --check . ;;
+            bun) bun run format:check || bunx prettier --check . ;;
+          esac
+        continue-on-error: true
+      
+      - name: TypeScript type check
+        run: |
+          if [ -f "tsconfig.json" ]; then
+            case "${{ inputs.package-manager }}" in
+              npm) npx tsc --noEmit ;;
+              yarn) yarn tsc --noEmit ;;
+              pnpm) pnpm tsc --noEmit ;;
+              bun) bunx tsc --noEmit ;;
+            esac
+          fi
+        continue-on-error: true
+
+  # ==================== CI: テスト ====================
+  test:
+    name: Unit & Integration Tests
+    runs-on: [self-hosted, macOS, ARM64]
+    if: inputs.run-tests
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+      
+      - name: Install pnpm
+        if: inputs.package-manager == 'pnpm'
+        run: npm install -g pnpm
+      
+      - name: Install bun
+        if: inputs.package-manager == 'bun'
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm ci ;;
+            yarn) yarn install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            bun) bun install --frozen-lockfile ;;
+          esac
+      
+      - name: Run tests
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm test -- --coverage ;;
+            yarn) yarn test --coverage ;;
+            pnpm) pnpm test --coverage ;;
+            bun) bun test --coverage ;;
+          esac
+      
+      - name: Upload coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/coverage/
+          retention-days: 30
+
+  # ==================== CI: E2Eテスト ====================
+  e2e-test:
+    name: E2E Tests
+    runs-on: [self-hosted, macOS, ARM64]
+    if: inputs.run-e2e-tests
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+      
+      - name: Install dependencies
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm ci ;;
+            yarn) yarn install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            bun) bun install --frozen-lockfile ;;
+          esac
+      
+      - name: Install Playwright
+        run: npx playwright install --with-deps
+      
+      - name: Run E2E tests
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm run test:e2e ;;
+            yarn) yarn test:e2e ;;
+            pnpm) pnpm test:e2e ;;
+            bun) bun run test:e2e ;;
+          esac
+      
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/playwright-report/
+          retention-days: 30
+
+  # ==================== CI: ビルド ====================
+  build:
+    name: Build Application
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: [lint, test]
+    if: |
+      always() && 
+      (needs.lint.result == 'success' || needs.lint.result == 'skipped') &&
+      (needs.test.result == 'success' || needs.test.result == 'skipped')
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+      
+      - name: Install pnpm
+        if: inputs.package-manager == 'pnpm'
+        run: npm install -g pnpm
+      
+      - name: Install bun
+        if: inputs.package-manager == 'bun'
+        run: |
+          curl -fsSL https://bun.sh/install | bash
+          echo "$HOME/.bun/bin" >> $GITHUB_PATH
+      
+      - name: Install dependencies
+        run: |
+          case "${{ inputs.package-manager }}" in
+            npm) npm ci ;;
+            yarn) yarn install --frozen-lockfile ;;
+            pnpm) pnpm install --frozen-lockfile ;;
+            bun) bun install --frozen-lockfile ;;
+          esac
+      
+      - name: Setup environment variables
+        if: secrets.ENV_VARS != ''
+        run: |
+          echo "${{ secrets.ENV_VARS }}" > .env.production
+      
+      - name: Build application
+        run: ${{ inputs.build-command }}
+        env:
+          NODE_ENV: production
+          VITE_ENV: ${{ inputs.environment }}
+          NEXT_PUBLIC_ENV: ${{ inputs.environment }}
+          NUXT_PUBLIC_ENV: ${{ inputs.environment }}
+          PUBLIC_ENV: ${{ inputs.environment }}
+          BASE_URL: ${{ inputs.base-url }}
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/${{ inputs.build-directory }}/
+          retention-days: 30
+
+  # ==================== CD: Cloudflare Pages デプロイ ====================
+  deploy-cloudflare:
+    name: Deploy to Cloudflare Pages
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build
+    if: |
+      inputs.deploy-provider == 'cloudflare' && 
+      (inputs.deploy-production || (inputs.deploy-preview && github.event_name == 'pull_request'))
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/${{ inputs.build-directory }}
+      
+      - name: Deploy to Cloudflare Pages
+        run: |
+          npx wrangler pages deploy ${{ inputs.build-directory }} \
+            --project-name=${{ github.event.repository.name }} \
+            --branch=${{ github.ref_name }} \
+            --commit-hash=${{ github.sha }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+      
+      - name: Comment deployment URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Deployed to Cloudflare Pages!\n\nPreview: https://${context.payload.pull_request.head.sha}.${context.repo.repo}.pages.dev`
+            })
+
+  # ==================== CD: Vercel デプロイ ====================
+  deploy-vercel:
+    name: Deploy to Vercel
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build
+    if: |
+      inputs.deploy-provider == 'vercel' && 
+      (inputs.deploy-production || (inputs.deploy-preview && github.event_name == 'pull_request'))
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+      
+      - name: Pull Vercel Environment
+        run: |
+          vercel pull --yes \
+            --environment=${{ inputs.environment }} \
+            --token=${{ secrets.VERCEL_TOKEN }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      
+      - name: Build with Vercel
+        run: vercel build ${{ inputs.deploy-production && '--prod' || '' }}
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      
+      - name: Deploy to Vercel
+        id: deploy
+        run: |
+          URL=$(vercel deploy --prebuilt ${{ inputs.deploy-production && '--prod' || '' }} --token=${{ secrets.VERCEL_TOKEN }})
+          echo "url=$URL" >> $GITHUB_OUTPUT
+          echo "Deployed to: $URL"
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+      
+      - name: Comment deployment URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Deployed to Vercel!\n\nPreview: ${{ steps.deploy.outputs.url }}`
+            })
+
+  # ==================== CD: Netlify デプロイ ====================
+  deploy-netlify:
+    name: Deploy to Netlify
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build
+    if: |
+      inputs.deploy-provider == 'netlify' && 
+      (inputs.deploy-production || (inputs.deploy-preview && github.event_name == 'pull_request'))
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/${{ inputs.build-directory }}
+      
+      - name: Install Netlify CLI
+        run: npm install -g netlify-cli
+      
+      - name: Deploy to Netlify
+        id: deploy
+        run: |
+          if [ "${{ inputs.deploy-production }}" = "true" ]; then
+            netlify deploy --prod --dir=${{ inputs.build-directory }} --site=${{ secrets.NETLIFY_SITE_ID }} --auth=${{ secrets.NETLIFY_AUTH_TOKEN }}
+          else
+            URL=$(netlify deploy --dir=${{ inputs.build-directory }} --site=${{ secrets.NETLIFY_SITE_ID }} --auth=${{ secrets.NETLIFY_AUTH_TOKEN }} | grep "Website Draft URL" | awk '{print $4}')
+            echo "url=$URL" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Comment deployment URL
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `🚀 Deployed to Netlify!\n\nPreview: ${{ steps.deploy.outputs.url }}`
+            })
+
+  # ==================== CD: Firebase Hosting デプロイ ====================
+  deploy-firebase:
+    name: Deploy to Firebase Hosting
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build
+    if: inputs.deploy-provider == 'firebase' && inputs.deploy-production
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/${{ inputs.build-directory }}
+      
+      - name: Deploy to Firebase Hosting
+        run: |
+          npm install -g firebase-tools
+          firebase deploy --only hosting:${{ inputs.environment }} --token "${{ secrets.FIREBASE_TOKEN }}"
+
+  # ==================== CD: GitHub Pages デプロイ ====================
+  deploy-github-pages:
+    name: Deploy to GitHub Pages
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build
+    if: inputs.deploy-provider == 'github-pages' && inputs.deploy-production
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    
+    steps:
+      - name: Download build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/${{ inputs.build-directory }}
+      
+      - name: Upload to GitHub Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: ${{ inputs.working-directory }}/${{ inputs.build-directory }}
+      
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
+
+  # ==================== サマリーレポート ====================
+  report:
+    name: Deployment Summary
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: [lint, test, build]
+    if: always()
+    
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🌐 Web CI/CD Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Framework**: ${{ inputs.framework }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Node.js**: ${{ inputs.node-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Package Manager**: ${{ inputs.package-manager }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Deploy Provider**: ${{ inputs.deploy-provider }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Lint: ${{ needs.lint.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Test: ${{ needs.test.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+

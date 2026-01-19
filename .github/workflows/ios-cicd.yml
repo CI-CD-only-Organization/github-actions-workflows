@@ -1,0 +1,121 @@
+name: iOS/macOS CI/CD Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      xcode-version:
+        description: 'Xcode version path'
+        required: false
+        default: '/Applications/Xcode.app'
+        type: string
+      
+      scheme:
+        description: 'Xcode scheme name'
+        required: true
+        type: string
+      
+      workspace:
+        description: 'Xcode workspace file (optional)'
+        required: false
+        type: string
+      
+      project:
+        description: 'Xcode project file (optional)'
+        required: false
+        type: string
+      
+      build-ios:
+        description: 'Build iOS'
+        required: false
+        default: true
+        type: boolean
+      
+      build-macos:
+        description: 'Build macOS'
+        required: false
+        default: false
+        type: boolean
+      
+      run-tests:
+        description: 'Run tests'
+        required: false
+        default: true
+        type: boolean
+      
+      deploy-testflight:
+        description: 'Deploy to TestFlight'
+        required: false
+        default: false
+        type: boolean
+      
+      environment:
+        description: 'Environment'
+        required: false
+        default: 'dev'
+        type: string
+    
+    secrets:
+      IOS_CERTIFICATE_BASE64:
+        required: false
+      IOS_PROVISIONING_PROFILE_BASE64:
+        required: false
+      IOS_CERTIFICATE_PASSWORD:
+        required: false
+      APP_STORE_CONNECT_API_KEY:
+        required: false
+
+jobs:
+  build-test:
+    runs-on: [self-hosted, macOS, ARM64]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Select Xcode
+        run: |
+          sudo xcode-select -s ${{ inputs.xcode-version }}
+          xcodebuild -version
+          xcrun --show-sdk-path
+      
+      - name: Install dependencies
+        run: |
+          if [ -f "Podfile" ]; then
+            pod install --repo-update
+          fi
+          
+          if [ -f "Cartfile" ]; then
+            carthage bootstrap --platform iOS --use-xcframeworks
+          fi
+      
+      - name: Run tests
+        if: inputs.run-tests
+        run: |
+          xcodebuild test \
+            ${{ inputs.workspace != '' && format('-workspace {0}', inputs.workspace) || format('-project {0}', inputs.project) }} \
+            -scheme ${{ inputs.scheme }} \
+            -destination 'platform=iOS Simulator,name=iPhone 15 Pro' \
+            -enableCodeCoverage YES \
+            | xcpretty
+      
+      - name: Build iOS
+        if: inputs.build-ios
+        run: |
+          xcodebuild clean build \
+            ${{ inputs.workspace != '' && format('-workspace {0}', inputs.workspace) || format('-project {0}', inputs.project) }} \
+            -scheme ${{ inputs.scheme }} \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            | xcpretty
+      
+      - name: Build macOS
+        if: inputs.build-macos
+        run: |
+          xcodebuild clean build \
+            ${{ inputs.workspace != '' && format('-workspace {0}', inputs.workspace) || format('-project {0}', inputs.project) }} \
+            -scheme ${{ inputs.scheme }}-macOS \
+            -configuration Release \
+            -destination 'platform=macOS' \
+            | xcpretty
+

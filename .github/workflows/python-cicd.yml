@@ -1,0 +1,179 @@
+name: Python CI/CD Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      python-version:
+        required: false
+        default: '3.12'
+        type: string
+      
+      run-tests:
+        required: false
+        default: true
+        type: boolean
+      
+      run-linters:
+        required: false
+        default: true
+        type: boolean
+      
+      build-docker:
+        required: false
+        default: false
+        type: boolean
+      
+      deploy:
+        required: false
+        default: false
+        type: boolean
+      
+      working-directory:
+        required: false
+        default: '.'
+        type: string
+      
+      environment:
+        required: false
+        default: 'dev'
+        type: string
+    
+    secrets:
+      DOCKER_USERNAME:
+        required: false
+      DOCKER_PASSWORD:
+        required: false
+      DEPLOY_SSH_KEY:
+        required: false
+      DEPLOY_HOST:
+        required: false
+
+jobs:
+  # CI: テスト & Lint
+  test:
+    name: Test & Lint
+    runs-on: [self-hosted, macOS, ARM64]
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Python
+        run: |
+          python${{ inputs.python-version }} -m venv venv
+          source venv/bin/activate
+          pip install --upgrade pip setuptools wheel
+      
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ${{ inputs.working-directory }}/venv
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ inputs.python-version }}-${{ hashFiles('**/requirements.txt') }}
+      
+      - name: Install dependencies
+        run: |
+          source venv/bin/activate
+          pip install -r requirements.txt
+          pip install -r requirements-dev.txt || true
+      
+      - name: Run linters
+        if: inputs.run-linters
+        run: |
+          source venv/bin/activate
+          black --check .
+          flake8 . --max-line-length=88
+          mypy . || true
+      
+      - name: Run tests
+        if: inputs.run-tests
+        run: |
+          source venv/bin/activate
+          pytest tests/ \
+            --cov=src \
+            --cov-report=html \
+            --cov-report=xml \
+            --cov-report=term
+      
+      - name: Upload coverage
+        if: inputs.run-tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/htmlcov/
+
+  # CI: Docker ビルド
+  build-docker:
+    name: Build Docker Image
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: test
+    if: inputs.build-docker
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Build Docker image
+        run: |
+          docker build \
+            --tag ${{ github.event.repository.name }}:${{ github.sha }} \
+            --tag ${{ github.event.repository.name }}:${{ inputs.environment }} \
+            --build-arg ENV=${{ inputs.environment }} \
+            .
+      
+      - name: Test Docker image
+        run: |
+          docker run --rm ${{ github.event.repository.name }}:${{ github.sha }} python --version
+
+  # CD: Docker デプロイ
+  deploy-docker:
+    name: Deploy Docker Image
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build-docker
+    if: inputs.deploy && inputs.build-docker
+    
+    steps:
+      - name: Login to Docker Hub
+        if: secrets.DOCKER_USERNAME != '' && secrets.DOCKER_PASSWORD != ''
+        run: |
+          echo "${{ secrets.DOCKER_PASSWORD }}" | docker login -u "${{ secrets.DOCKER_USERNAME }}" --password-stdin
+      
+      - name: Push Docker image
+        run: |
+          docker push ${{ github.event.repository.name }}:${{ inputs.environment }}
+
+  # CD: サーバーデプロイ
+  deploy-server:
+    name: Deploy to Server
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: test
+    if: inputs.deploy && !inputs.build-docker
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Deploy via SSH
+        if: secrets.DEPLOY_SSH_KEY != '' && secrets.DEPLOY_HOST != ''
+        run: |
+          echo "${{ secrets.DEPLOY_SSH_KEY }}" > deploy_key
+          chmod 600 deploy_key
+          
+          rsync -avz -e "ssh -i deploy_key -o StrictHostKeyChecking=no" \
+            --exclude='.git' \
+            --exclude='venv' \
+            --exclude='__pycache__' \
+            . user@${{ secrets.DEPLOY_HOST }}:/path/to/app
+          
+          ssh -i deploy_key -o StrictHostKeyChecking=no user@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd /path/to/app
+            python3 -m venv venv
+            source venv/bin/activate
+            pip install -r requirements.txt
+            sudo systemctl restart your-app
+          EOF
+

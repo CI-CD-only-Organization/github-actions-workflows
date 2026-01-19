@@ -1,0 +1,514 @@
+name: Flutter CI/CD Pipeline
+
+on:
+  workflow_call:
+    inputs:
+      # CI設定
+      flutter-version:
+        description: 'Flutter version'
+        required: false
+        default: '3.27.1'
+        type: string
+      
+      run-tests:
+        description: 'Run tests'
+        required: false
+        default: true
+        type: boolean
+      
+      run-integration-tests:
+        description: 'Run integration tests'
+        required: false
+        default: false
+        type: boolean
+      
+      # ビルド設定
+      build-ios:
+        description: 'Build iOS'
+        required: false
+        default: true
+        type: boolean
+      
+      build-android:
+        description: 'Build Android'
+        required: false
+        default: true
+        type: boolean
+      
+      build-macos:
+        description: 'Build macOS'
+        required: false
+        default: false
+        type: boolean
+      
+      build-web:
+        description: 'Build Web'
+        required: false
+        default: false
+        type: boolean
+      
+      # CD設定（デプロイ）
+      deploy-web:
+        description: 'Deploy web to hosting'
+        required: false
+        default: false
+        type: boolean
+      
+      deploy-ios-testflight:
+        description: 'Deploy iOS to TestFlight'
+        required: false
+        default: false
+        type: boolean
+      
+      deploy-android-internal:
+        description: 'Deploy Android to Internal Testing'
+        required: false
+        default: false
+        type: boolean
+      
+      # その他
+      working-directory:
+        description: 'Working directory'
+        required: false
+        default: '.'
+        type: string
+      
+      environment:
+        description: 'Deployment environment (dev/staging/production)'
+        required: false
+        default: 'dev'
+        type: string
+    
+    secrets:
+      # Web デプロイ用
+      FIREBASE_TOKEN:
+        required: false
+      CLOUDFLARE_API_TOKEN:
+        required: false
+      
+      # iOS デプロイ用
+      IOS_CERTIFICATE_BASE64:
+        required: false
+      IOS_PROVISIONING_PROFILE_BASE64:
+        required: false
+      IOS_CERTIFICATE_PASSWORD:
+        required: false
+      APP_STORE_CONNECT_API_KEY:
+        required: false
+      
+      # Android デプロイ用
+      ANDROID_KEYSTORE_BASE64:
+        required: false
+      ANDROID_KEYSTORE_PASSWORD:
+        required: false
+      ANDROID_KEY_ALIAS:
+        required: false
+      ANDROID_KEY_PASSWORD:
+        required: false
+      GOOGLE_PLAY_SERVICE_ACCOUNT_JSON:
+        required: false
+
+jobs:
+  # ==================== CI: コード品質チェック ====================
+  analyze:
+    name: Code Analysis & Tests
+    runs-on: [self-hosted, macOS, ARM64]
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version }}
+          channel: 'stable'
+          cache: true
+      
+      - name: Get dependencies
+        run: flutter pub get
+      
+      - name: Verify dependencies
+        run: flutter pub outdated || true
+      
+      - name: Analyze code
+        run: flutter analyze --fatal-infos --fatal-warnings
+      
+      - name: Check code formatting
+        run: dart format --set-exit-if-changed .
+      
+      - name: Run unit tests
+        if: inputs.run-tests
+        run: flutter test --coverage --reporter expanded
+      
+      - name: Run integration tests
+        if: inputs.run-integration-tests
+        run: flutter test integration_test
+      
+      - name: Upload test coverage
+        if: inputs.run-tests
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/coverage/
+          retention-days: 30
+
+  # ==================== CI: iOS ビルド ====================
+  build-ios:
+    name: Build iOS
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: analyze
+    if: inputs.build-ios
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version }}
+          channel: 'stable'
+          cache: true
+      
+      - name: Get dependencies
+        run: flutter pub get
+      
+      - name: Setup Xcode
+        run: |
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+      
+      - name: Install CocoaPods dependencies
+        run: |
+          cd ios
+          pod install --repo-update
+      
+      - name: Configure build number
+        run: |
+          BUILD_NUMBER=${{ github.run_number }}
+          VERSION=$(grep 'version:' pubspec.yaml | cut -d ' ' -f 2 | cut -d '+' -f 1)
+          echo "Building version $VERSION+$BUILD_NUMBER"
+      
+      - name: Build iOS (Development)
+        if: inputs.environment != 'production'
+        run: |
+          flutter build ios --debug --no-codesign \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=${{ inputs.environment }}
+      
+      - name: Build iOS (Production - unsigned)
+        if: inputs.environment == 'production' && !inputs.deploy-ios-testflight
+        run: |
+          flutter build ios --release --no-codesign \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=production
+      
+      - name: Build iOS (Production - signed for TestFlight)
+        if: inputs.environment == 'production' && inputs.deploy-ios-testflight
+        run: |
+          # 証明書とプロビジョニングプロファイルをインストール
+          echo "${{ secrets.IOS_CERTIFICATE_BASE64 }}" | base64 --decode > certificate.p12
+          echo "${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}" | base64 --decode > profile.mobileprovision
+          
+          # キーチェーンに証明書をインポート
+          security create-keychain -p actions temp.keychain
+          security default-keychain -s temp.keychain
+          security unlock-keychain -p actions temp.keychain
+          security import certificate.p12 -k temp.keychain -P "${{ secrets.IOS_CERTIFICATE_PASSWORD }}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k actions temp.keychain
+          
+          # プロビジョニングプロファイルをインストール
+          mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+          cp profile.mobileprovision ~/Library/MobileDevice/Provisioning\ Profiles/
+          
+          # ビルド
+          flutter build ios --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=production
+      
+      - name: Upload iOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/build/ios/iphoneos/
+          retention-days: 30
+
+  # ==================== CI: Android ビルド ====================
+  build-android:
+    name: Build Android
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: analyze
+    if: inputs.build-android
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version }}
+          channel: 'stable'
+          cache: true
+      
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          cache: 'gradle'
+      
+      - name: Get dependencies
+        run: flutter pub get
+      
+      - name: Setup signing (if deploying)
+        if: inputs.deploy-android-internal
+        run: |
+          echo "${{ secrets.ANDROID_KEYSTORE_BASE64 }}" | base64 --decode > android/app/keystore.jks
+          
+          cat > android/key.properties << EOF
+          storePassword=${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          keyPassword=${{ secrets.ANDROID_KEY_PASSWORD }}
+          keyAlias=${{ secrets.ANDROID_KEY_ALIAS }}
+          storeFile=keystore.jks
+          EOF
+      
+      - name: Build APK (Development)
+        if: inputs.environment != 'production'
+        run: |
+          flutter build apk --debug \
+            --split-per-abi \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=${{ inputs.environment }}
+      
+      - name: Build APK (Production)
+        if: inputs.environment == 'production'
+        run: |
+          flutter build apk --release \
+            --split-per-abi \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=production
+      
+      - name: Build App Bundle (for Play Store)
+        if: inputs.deploy-android-internal
+        run: |
+          flutter build appbundle --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=production
+      
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-apk-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
+      
+      - name: Upload App Bundle
+        if: inputs.deploy-android-internal
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-bundle-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/build/app/outputs/bundle/release/*.aab
+          retention-days: 30
+
+  # ==================== CI: macOS ビルド ====================
+  build-macos:
+    name: Build macOS
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: analyze
+    if: inputs.build-macos
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version }}
+          channel: 'stable'
+          cache: true
+      
+      - name: Get dependencies
+        run: flutter pub get
+      
+      - name: Enable macOS desktop
+        run: flutter config --enable-macos-desktop
+      
+      - name: Build macOS
+        run: |
+          flutter build macos --release \
+            --build-number=${{ github.run_number }} \
+            --dart-define=ENV=${{ inputs.environment }}
+      
+      - name: Upload macOS build
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/build/macos/Build/Products/Release/
+          retention-days: 30
+
+  # ==================== CI: Web ビルド ====================
+  build-web:
+    name: Build Web
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: analyze
+    if: inputs.build-web
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ inputs.flutter-version }}
+          channel: 'stable'
+          cache: true
+      
+      - name: Get dependencies
+        run: flutter pub get
+      
+      - name: Build Web
+        run: |
+          flutter build web --release \
+            --web-renderer canvaskit \
+            --dart-define=ENV=${{ inputs.environment }} \
+            --base-href /
+      
+      - name: Upload Web build
+        uses: actions/upload-artifact@v4
+        with:
+          name: web-${{ inputs.environment }}-${{ github.sha }}
+          path: ${{ inputs.working-directory }}/build/web/
+          retention-days: 30
+
+  # ==================== CD: iOS TestFlight デプロイ ====================
+  deploy-ios:
+    name: Deploy iOS to TestFlight
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build-ios
+    if: inputs.deploy-ios-testflight && inputs.environment == 'production'
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download iOS build
+        uses: actions/download-artifact@v4
+        with:
+          name: ios-${{ inputs.environment }}-${{ github.sha }}
+          path: build/ios/iphoneos/
+      
+      - name: Upload to TestFlight
+        run: |
+          # xcrun altool or fastlane を使用
+          # 例: fastlane を使う場合
+          # gem install fastlane
+          # fastlane pilot upload --ipa build/ios/iphoneos/Runner.ipa
+          echo "TestFlight upload would happen here"
+          echo "Requires App Store Connect API key"
+        env:
+          APP_STORE_CONNECT_API_KEY: ${{ secrets.APP_STORE_CONNECT_API_KEY }}
+
+  # ==================== CD: Android Play Store デプロイ ====================
+  deploy-android:
+    name: Deploy Android to Play Store
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build-android
+    if: inputs.deploy-android-internal && inputs.environment == 'production'
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download Android Bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: android-bundle-${{ inputs.environment }}-${{ github.sha }}
+          path: build/app/outputs/bundle/release/
+      
+      - name: Upload to Play Store (Internal Testing)
+        run: |
+          # Google Play Console API を使用
+          # 例: fastlane または gradle-play-publisher プラグイン
+          echo "Play Store upload would happen here"
+          echo "Requires Google Play service account JSON"
+        env:
+          GOOGLE_PLAY_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_PLAY_SERVICE_ACCOUNT_JSON }}
+
+  # ==================== CD: Web デプロイ ====================
+  deploy-web:
+    name: Deploy Web
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: build-web
+    if: inputs.deploy-web
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download Web build
+        uses: actions/download-artifact@v4
+        with:
+          name: web-${{ inputs.environment }}-${{ github.sha }}
+          path: build/web/
+      
+      - name: Deploy to Firebase Hosting
+        if: secrets.FIREBASE_TOKEN != ''
+        run: |
+          npm install -g firebase-tools
+          firebase deploy \
+            --only hosting:${{ inputs.environment }} \
+            --token "${{ secrets.FIREBASE_TOKEN }}" \
+            --project your-firebase-project
+      
+      - name: Deploy to Cloudflare Pages
+        if: secrets.CLOUDFLARE_API_TOKEN != ''
+        run: |
+          npx wrangler pages deploy build/web \
+            --project-name=${{ github.event.repository.name }}-${{ inputs.environment }} \
+            --branch=${{ inputs.environment }}
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+
+  # ==================== サマリーレポート ====================
+  report:
+    name: Build & Deploy Summary
+    runs-on: [self-hosted, macOS, ARM64]
+    needs: [analyze, build-ios, build-android, build-macos, build-web]
+    if: always()
+    
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 📊 CI/CD Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Environment**: ${{ inputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Flutter Version**: ${{ inputs.flutter-version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Build Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Analysis: ${{ needs.analyze.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- iOS: ${{ needs.build-ios.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Android: ${{ needs.build-android.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- macOS: ${{ needs.build-macos.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Web: ${{ needs.build-web.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
+
