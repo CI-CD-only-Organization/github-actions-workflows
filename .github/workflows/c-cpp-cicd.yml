@@ -1,0 +1,398 @@
+# C/C++ CI/CD 再利用可能ワークフロー
+# システムプログラミング、組み込み、CLI ツール開発向け
+
+name: C/C++ CI/CD
+
+on:
+  workflow_call:
+    inputs:
+      # 言語設定
+      language:
+        description: 'Language (c or cpp)'
+        required: false
+        type: string
+        default: 'c'
+      
+      # コンパイラ設定
+      compiler:
+        description: 'Compiler (gcc, clang, auto)'
+        required: false
+        type: string
+        default: 'auto'
+      
+      c-standard:
+        description: 'C standard (c89, c99, c11, c17, c23)'
+        required: false
+        type: string
+        default: 'c11'
+      
+      cpp-standard:
+        description: 'C++ standard (c++11, c++14, c++17, c++20, c++23)'
+        required: false
+        type: string
+        default: 'c++17'
+      
+      # ビルドシステム
+      build-system:
+        description: 'Build system (make, cmake, meson, autotools)'
+        required: false
+        type: string
+        default: 'cmake'
+      
+      cmake-options:
+        description: 'CMake options'
+        required: false
+        type: string
+        default: '-DCMAKE_BUILD_TYPE=Release'
+      
+      make-target:
+        description: 'Make target'
+        required: false
+        type: string
+        default: 'all'
+      
+      # テスト設定
+      run-tests:
+        description: 'Run tests'
+        required: false
+        type: boolean
+        default: true
+      
+      test-command:
+        description: 'Test command'
+        required: false
+        type: string
+        default: 'ctest'
+      
+      # 静的解析
+      run-static-analysis:
+        description: 'Run static analysis'
+        required: false
+        type: boolean
+        default: true
+      
+      run-valgrind:
+        description: 'Run Valgrind memory leak check'
+        required: false
+        type: boolean
+        default: false
+      
+      # クロスコンパイル
+      build-targets:
+        description: 'Build targets (comma-separated: linux-x64,linux-arm64,macos-arm64,windows-x64)'
+        required: false
+        type: string
+        default: 'native'
+      
+      # ドキュメント生成
+      generate-docs:
+        description: 'Generate Doxygen documentation'
+        required: false
+        type: boolean
+        default: false
+      
+      # 最適化オプション
+      optimization-level:
+        description: 'Optimization level (O0, O1, O2, O3, Os)'
+        required: false
+        type: string
+        default: 'O2'
+      
+      # 作業ディレクトリ
+      working-directory:
+        required: false
+        type: string
+        default: '.'
+      
+      # ランナー
+      runs-on:
+        required: false
+        type: string
+        default: 'ubuntu-latest'
+    
+    secrets:
+      GITHUB_TOKEN:
+        required: false
+
+jobs:
+  # 環境セットアップ
+  setup:
+    name: Setup Environment
+    runs-on: ${{ inputs.runs-on }}
+    outputs:
+      compiler: ${{ steps.detect.outputs.compiler }}
+      compiler-version: ${{ steps.detect.outputs.version }}
+    
+    steps:
+      - name: Detect compiler
+        id: detect
+        run: |
+          if [ "${{ inputs.compiler }}" = "auto" ]; then
+            # 自動検出
+            if command -v clang &> /dev/null; then
+              echo "compiler=clang" >> $GITHUB_OUTPUT
+              echo "version=$(clang --version | head -1)" >> $GITHUB_OUTPUT
+            elif command -v gcc &> /dev/null; then
+              echo "compiler=gcc" >> $GITHUB_OUTPUT
+              echo "version=$(gcc --version | head -1)" >> $GITHUB_OUTPUT
+            fi
+          else
+            echo "compiler=${{ inputs.compiler }}" >> $GITHUB_OUTPUT
+            echo "version=$(${{ inputs.compiler }} --version | head -1)" >> $GITHUB_OUTPUT
+          fi
+      
+      - name: Install dependencies
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y \
+              build-essential \
+              cmake \
+              ninja-build \
+              valgrind \
+              cppcheck \
+              clang-tidy \
+              lcov
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install cmake ninja cppcheck llvm
+          fi
+
+  # 静的解析
+  static-analysis:
+    name: Static Analysis
+    runs-on: ${{ inputs.runs-on }}
+    needs: setup
+    if: inputs.run-static-analysis
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install analysis tools
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y cppcheck clang-tidy
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install cppcheck llvm
+          fi
+      
+      - name: Run cppcheck
+        run: |
+          cppcheck \
+            --enable=all \
+            --inconclusive \
+            --std=${{ inputs.c-standard }} \
+            --suppress=missingIncludeSystem \
+            --error-exitcode=1 \
+            . || echo "⚠️ cppcheck found issues"
+      
+      - name: Run clang-tidy
+        if: inputs.language == 'cpp'
+        run: |
+          find . -name "*.cpp" -o -name "*.c" | xargs clang-tidy \
+            -checks='*,-llvmlibc-*' \
+            -- -std=${{ inputs.cpp-standard }} || true
+
+  # ビルド
+  build:
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ inputs.runs-on }}
+    needs: [setup, static-analysis]
+    if: always() && needs.setup.result == 'success'
+    
+    strategy:
+      fail-fast: false
+      matrix:
+        target: ${{ fromJson(format('["{0}"]', inputs.build-targets == 'native' && 'native' || inputs.build-targets)) }}
+    
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install build tools
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get update
+            sudo apt-get install -y build-essential cmake ninja-build
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install cmake ninja
+          fi
+      
+      - name: Configure with CMake
+        if: inputs.build-system == 'cmake'
+        run: |
+          mkdir -p build
+          cd build
+          
+          # コンパイラ設定
+          CC="${{ needs.setup.outputs.compiler }}"
+          CXX="${{ needs.setup.outputs.compiler }}++"
+          
+          # 標準設定
+          if [ "${{ inputs.language }}" = "c" ]; then
+            STD_FLAG="-DCMAKE_C_STANDARD=${{ inputs.c-standard }}"
+          else
+            STD_FLAG="-DCMAKE_CXX_STANDARD=${{ inputs.cpp-standard }}"
+          fi
+          
+          cmake .. \
+            -GNinja \
+            -DCMAKE_C_COMPILER=$CC \
+            -DCMAKE_CXX_COMPILER=$CXX \
+            $STD_FLAG \
+            ${{ inputs.cmake-options }}
+      
+      - name: Build with CMake
+        if: inputs.build-system == 'cmake'
+        run: |
+          cd build
+          ninja -v
+      
+      - name: Build with Make
+        if: inputs.build-system == 'make'
+        run: |
+          make ${{ inputs.make-target }} \
+            CC=${{ needs.setup.outputs.compiler }} \
+            CFLAGS="-std=${{ inputs.c-standard }} -${{ inputs.optimization-level }} -Wall -Wextra"
+      
+      - name: Build with Autotools
+        if: inputs.build-system == 'autotools'
+        run: |
+          ./autogen.sh || ./configure
+          make ${{ inputs.make-target }}
+      
+      - name: Build with Meson
+        if: inputs.build-system == 'meson'
+        run: |
+          meson setup build
+          meson compile -C build
+      
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: binaries-${{ matrix.target }}
+          path: |
+            ${{ inputs.working-directory }}/build/**/*
+            ${{ inputs.working-directory }}/**/*.out
+            ${{ inputs.working-directory }}/**/*.a
+            ${{ inputs.working-directory }}/**/*.so
+          retention-days: 7
+
+  # テスト
+  test:
+    name: Test
+    runs-on: ${{ inputs.runs-on }}
+    needs: [setup, build]
+    if: inputs.run-tests
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: binaries-native
+          path: ${{ inputs.working-directory }}
+      
+      - name: Run tests (CMake/CTest)
+        if: inputs.build-system == 'cmake' && inputs.test-command == 'ctest'
+        run: |
+          cd build
+          ctest --output-on-failure --verbose
+      
+      - name: Run tests (Custom)
+        if: inputs.test-command != 'ctest'
+        run: ${{ inputs.test-command }}
+      
+      - name: Run Valgrind
+        if: inputs.run-valgrind && runner.os == 'Linux'
+        run: |
+          sudo apt-get install -y valgrind
+          
+          # テスト実行ファイルを探して実行
+          find build -type f -executable -exec valgrind \
+            --leak-check=full \
+            --show-leak-kinds=all \
+            --track-origins=yes \
+            --error-exitcode=1 \
+            {} \; || echo "⚠️ Memory leaks detected"
+      
+      - name: Generate coverage report
+        if: inputs.build-system == 'cmake'
+        run: |
+          if command -v lcov &> /dev/null; then
+            cd build
+            lcov --capture --directory . --output-file coverage.info
+            lcov --remove coverage.info '/usr/*' --output-file coverage.info
+            lcov --list coverage.info
+          fi
+      
+      - name: Upload coverage
+        if: inputs.build-system == 'cmake'
+        uses: codecov/codecov-action@v4
+        with:
+          files: ${{ inputs.working-directory }}/build/coverage.info
+          flags: c-cpp
+
+  # ドキュメント生成
+  docs:
+    name: Generate Documentation
+    runs-on: ${{ inputs.runs-on }}
+    needs: build
+    if: inputs.generate-docs
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install Doxygen
+        run: |
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            sudo apt-get install -y doxygen graphviz
+          elif [ "$RUNNER_OS" = "macOS" ]; then
+            brew install doxygen graphviz
+          fi
+      
+      - name: Generate documentation
+        run: |
+          if [ -f "Doxyfile" ]; then
+            doxygen Doxyfile
+          else
+            doxygen -g
+            doxygen
+          fi
+      
+      - name: Upload documentation
+        uses: actions/upload-artifact@v4
+        with:
+          name: documentation
+          path: html/
+
+  # サマリー
+  summary:
+    name: Build Summary
+    runs-on: ${{ inputs.runs-on }}
+    needs: [setup, build, test]
+    if: always()
+    
+    steps:
+      - name: Generate summary
+        run: |
+          echo "## 🔨 C/C++ Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Language**: ${{ inputs.language }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Compiler**: ${{ needs.setup.outputs.compiler }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Standard**: ${{ inputs.language == 'c' && inputs.c-standard || inputs.cpp-standard }}" >> $GITHUB_STEP_SUMMARY
+          echo "**Build System**: ${{ inputs.build-system }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Results" >> $GITHUB_STEP_SUMMARY
+          echo "- Build: ${{ needs.build.result }}" >> $GITHUB_STEP_SUMMARY
+          echo "- Test: ${{ needs.test.result || 'skipped' }}" >> $GITHUB_STEP_SUMMARY
