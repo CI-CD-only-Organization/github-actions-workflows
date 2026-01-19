@@ -1,0 +1,54 @@
+# モノレポ（Monorepo）での使用例
+# apps/web, apps/api, packages/shared などの構成に対応
+
+name: Monorepo CI/CD Example
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Webフロントエンドのビルド
+  web-app:
+    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/web-cicd.yml@main
+    with:
+      project-type: 'nextjs'
+      package-manager: 'pnpm'
+      working-directory: 'apps/web'  # モノレポ内のディレクトリ
+      build-command: 'pnpm --filter web build'
+      deploy: true
+      deploy-target: 'vercel'
+      environment: 'production'
+    secrets:
+      VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+      VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+      VERCEL_PROJECT_ID: ${{ secrets.WEB_PROJECT_ID }}
+  
+  # APIバックエンドのビルド
+  api-service:
+    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/python-cicd.yml@main
+    with:
+      project-type: 'fastapi'
+      package-manager: 'poetry'
+      working-directory: 'apps/api'
+      deploy: true
+      deploy-target: 'cloudflare-workers'
+      environment: 'production'
+    secrets:
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+  
+  # モバイルアプリのビルド
+  mobile-app:
+    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/flutter-cicd.yml@main
+    with:
+      flutter-version: '3.27.1'
+      working-directory: 'apps/mobile'
+      build-ios: true
+      build-android: true
+      runs-on: 'self-hosted'
+    secrets:
+      APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+      ANDROID_KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
