@@ -11,7 +11,7 @@ on:
 
 jobs:
   build-and-deploy:
-    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/web-cicd.yml@main
+    uses: tomoya-cicd/github-actions-workflows/.github/workflows/web-cicd.yml@main
     
     with:
       # プロジェクトタイプ（react, vue, nextjs, nuxt, svelte, astro, vite）
