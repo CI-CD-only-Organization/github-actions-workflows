@@ -1,0 +1,54 @@
+# Rust CI/CD ワークフローの使用例
+# CLI、Web API、システムプログラミングなどに対応
+
+name: Rust CI/CD Example
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  release:
+    types: [created]
+
+jobs:
+  build-and-release:
+    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/rust-cicd.yml@main
+    
+    with:
+      # Rustバージョン（stable, beta, nightly）
+      rust-version: 'stable'
+      
+      # ビルドターゲット（クロスコンパイル対応）
+      # カンマ区切りで複数指定可能
+      build-targets: 'x86_64-unknown-linux-gnu,x86_64-apple-darwin,x86_64-pc-windows-msvc,aarch64-apple-darwin'
+      
+      # テスト設定
+      run-tests: true              # cargo test 実行
+      run-clippy: true             # Clippy（リンター）実行
+      run-fmt-check: true          # コードフォーマットチェック
+      
+      # ベンチマーク
+      run-benchmarks: false        # cargo bench 実行
+      
+      # セキュリティ監査
+      run-audit: true              # cargo audit でセキュリティチェック
+      
+      # リリース設定
+      create-release: true         # GitHub Releaseを作成
+      upload-artifacts: true       # ビルド成果物をアップロード
+      
+      # 最適化レベル（debug, release）
+      build-profile: 'release'
+      
+      # Cargo features
+      cargo-features: 'default,cli'  # 有効にするfeatures
+      
+      runs-on: 'self-hosted'  # Mac Studioでクロスコンパイル
+    
+    secrets:
+      # crates.io への公開用（オプション）
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      
+      # GitHub Release用トークン
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
