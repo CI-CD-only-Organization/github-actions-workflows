@@ -1,0 +1,44 @@
+# C Language CI/CD Example
+
+name: C CI/CD Example
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    uses: tomoya-cicd/github-actions-workflows/.github/workflows/c-cpp-cicd.yml@main
+    
+    with:
+      # 言語設定
+      language: 'c'
+      c-standard: 'c11'
+      
+      # コンパイラ
+      compiler: 'clang'  # または 'gcc', 'auto'
+      
+      # ビルドシステム
+      build-system: 'cmake'
+      cmake-options: '-DCMAKE_BUILD_TYPE=Release -DENABLE_TESTS=ON'
+      
+      # テスト
+      run-tests: true
+      test-command: 'ctest'
+      
+      # 静的解析
+      run-static-analysis: true
+      run-valgrind: true  # メモリリークチェック
+      
+      # 最適化
+      optimization-level: 'O2'
+      
+      # クロスコンパイル（オプション）
+      # build-targets: 'native,linux-arm64'
+      
+      # ドキュメント
+      generate-docs: false
+      
+      # ランナー
+      runs-on: 'self-hosted'  # Mac Studio
