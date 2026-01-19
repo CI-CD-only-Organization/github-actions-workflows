@@ -28,7 +28,7 @@ jobs:
   
   # APIバックエンドのビルド
   api-service:
-    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/python-cicd.yml@main
+    uses: tomoya-cicd/github-actions-workflows/.github/workflows/python-cicd.yml@main
     with:
       project-type: 'fastapi'
       package-manager: 'poetry'
@@ -42,7 +42,7 @@ jobs:
   
   # モバイルアプリのビルド
   mobile-app:
-    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/flutter-cicd.yml@main
+    uses: tomoya-cicd/github-actions-workflows/.github/workflows/flutter-cicd.yml@main
     with:
       flutter-version: '3.27.1'
       working-directory: 'apps/mobile'
