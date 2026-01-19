@@ -26,7 +26,7 @@ jobs:
   # 再利用可能なワークフローを呼び出し
   build-and-deploy:
     # CI-CD-only-Organizationの共通ワークフローを使用
-    uses: CI-CD-only-Organization/github-actions-workflows/.github/workflows/flutter-cicd.yml@main
+    uses: tomoya-cicd/github-actions-workflows/.github/workflows/flutter-cicd.yml@main
     
     with:
       # Flutterのバージョン指定（省略時は最新安定版）
