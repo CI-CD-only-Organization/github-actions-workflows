@@ -1,121 +1,214 @@
-name: iOS/macOS CI/CD Pipeline
+# iOS CI/CD 再利用可能ワークフロー
+# Swift/SwiftUI、UIKit を使ったネイティブiOSアプリ向け
+
+name: iOS CI/CD
 
 on:
   workflow_call:
     inputs:
       xcode-version:
-        description: 'Xcode version path'
+        description: 'Xcodeバージョン'
         required: false
-        default: '/Applications/Xcode.app'
         type: string
+        default: '15.2'
       
-      scheme:
-        description: 'Xcode scheme name'
+      xcode-project:
+        description: 'Xcodeプロジェクト名（.xcodeproj）'
         required: true
         type: string
       
-      workspace:
-        description: 'Xcode workspace file (optional)'
-        required: false
+      scheme:
+        description: 'ビルドスキーム'
+        required: true
         type: string
       
-      project:
-        description: 'Xcode project file (optional)'
+      configuration:
+        description: 'ビルド構成（Debug/Release）'
         required: false
         type: string
-      
-      build-ios:
-        description: 'Build iOS'
-        required: false
-        default: true
-        type: boolean
-      
-      build-macos:
-        description: 'Build macOS'
-        required: false
-        default: false
-        type: boolean
+        default: 'Release'
       
       run-tests:
-        description: 'Run tests'
+        description: 'ユニットテストを実行'
         required: false
-        default: true
         type: boolean
+        default: true
       
       deploy-testflight:
-        description: 'Deploy to TestFlight'
+        description: 'TestFlightにデプロイ'
         required: false
-        default: false
         type: boolean
+        default: false
       
-      environment:
-        description: 'Environment'
+      simulator:
+        description: 'テスト用シミュレーター'
         required: false
-        default: 'dev'
         type: string
+        default: 'iPhone 15 Pro'
+      
+      ios-version:
+        description: 'シミュレーターのiOSバージョン'
+        required: false
+        type: string
+        default: '17.2'
+      
+      working-directory:
+        required: false
+        type: string
+        default: '.'
+      
+      runs-on:
+        required: false
+        type: string
+        default: 'macos-14'
     
     secrets:
-      IOS_CERTIFICATE_BASE64:
+      APPLE_CERTIFICATE_BASE64:
         required: false
-      IOS_PROVISIONING_PROFILE_BASE64:
+      APPLE_CERTIFICATE_PASSWORD:
         required: false
-      IOS_CERTIFICATE_PASSWORD:
+      APPLE_PROVISIONING_PROFILE_BASE64:
         required: false
-      APP_STORE_CONNECT_API_KEY:
+      KEYCHAIN_PASSWORD:
+        required: false
+      APPLE_API_KEY_ID:
+        required: false
+      APPLE_API_ISSUER_ID:
+        required: false
+      APPLE_API_KEY_BASE64:
         required: false
 
 jobs:
-  build-test:
-    runs-on: [self-hosted, macOS, ARM64]
+  build-and-test:
+    name: Build and Test
+    runs-on: ${{ inputs.runs-on }}
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
     
     steps:
       - uses: actions/checkout@v4
       
       - name: Select Xcode
-        run: |
-          sudo xcode-select -s ${{ inputs.xcode-version }}
-          xcodebuild -version
-          xcrun --show-sdk-path
+        run: sudo xcode-select -s /Applications/Xcode_${{ inputs.xcode-version }}.app
+      
+      - name: Show Xcode version
+        run: xcodebuild -version
       
       - name: Install dependencies
         run: |
           if [ -f "Podfile" ]; then
-            pod install --repo-update
+            sudo gem install cocoapods
+            pod install
           fi
-          
-          if [ -f "Cartfile" ]; then
-            carthage bootstrap --platform iOS --use-xcframeworks
+      
+      - name: Cache CocoaPods
+        if: hashFiles('Podfile.lock') != ''
+        uses: actions/cache@v4
+        with:
+          path: Pods
+          key: ${{ runner.os }}-pods-${{ hashFiles('Podfile.lock') }}
+      
+      - name: Run SwiftLint
+        continue-on-error: true
+        run: |
+          if [ -f ".swiftlint.yml" ] && command -v swiftlint &> /dev/null; then
+            swiftlint lint
           fi
       
       - name: Run tests
         if: inputs.run-tests
         run: |
-          xcodebuild test \
-            ${{ inputs.workspace != '' && format('-workspace {0}', inputs.workspace) || format('-project {0}', inputs.project) }} \
-            -scheme ${{ inputs.scheme }} \
-            -destination 'platform=iOS Simulator,name=iPhone 15 Pro' \
-            -enableCodeCoverage YES \
-            | xcpretty
+          WORKSPACE="${{ inputs.xcode-project }}"
+          WORKSPACE="${WORKSPACE%.xcodeproj}.xcworkspace"
+          
+          if [ -f "$WORKSPACE" ]; then
+            xcodebuild test \
+              -workspace "$WORKSPACE" \
+              -scheme "${{ inputs.scheme }}" \
+              -destination 'platform=iOS Simulator,name=${{ inputs.simulator }},OS=${{ inputs.ios-version }}' \
+              -configuration Debug \
+              -enableCodeCoverage YES
+          else
+            xcodebuild test \
+              -project "${{ inputs.xcode-project }}" \
+              -scheme "${{ inputs.scheme }}" \
+              -destination 'platform=iOS Simulator,name=${{ inputs.simulator }},OS=${{ inputs.ios-version }}' \
+              -configuration Debug \
+              -enableCodeCoverage YES
+          fi
       
-      - name: Build iOS
-        if: inputs.build-ios
+      - name: Build for release
         run: |
-          xcodebuild clean build \
-            ${{ inputs.workspace != '' && format('-workspace {0}', inputs.workspace) || format('-project {0}', inputs.project) }} \
-            -scheme ${{ inputs.scheme }} \
-            -configuration Release \
-            -destination 'generic/platform=iOS' \
-            CODE_SIGN_IDENTITY="" \
-            CODE_SIGNING_REQUIRED=NO \
-            | xcpretty
+          WORKSPACE="${{ inputs.xcode-project }}"
+          WORKSPACE="${WORKSPACE%.xcodeproj}.xcworkspace"
+          
+          if [ -f "$WORKSPACE" ]; then
+            xcodebuild build \
+              -workspace "$WORKSPACE" \
+              -scheme "${{ inputs.scheme }}" \
+              -configuration "${{ inputs.configuration }}" \
+              -destination 'generic/platform=iOS' \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO
+          else
+            xcodebuild build \
+              -project "${{ inputs.xcode-project }}" \
+              -scheme "${{ inputs.scheme }}" \
+              -configuration "${{ inputs.configuration }}" \
+              -destination 'generic/platform=iOS' \
+              CODE_SIGN_IDENTITY="" \
+              CODE_SIGNING_REQUIRED=NO
+          fi
+  
+  deploy-testflight:
+    name: Deploy to TestFlight
+    needs: build-and-test
+    if: inputs.deploy-testflight
+    runs-on: ${{ inputs.runs-on }}
+    
+    steps:
+      - uses: actions/checkout@v4
       
-      - name: Build macOS
-        if: inputs.build-macos
+      - name: Select Xcode
+        run: sudo xcode-select -s /Applications/Xcode_${{ inputs.xcode-version }}.app
+      
+      - name: Install Apple Certificate
+        env:
+          BUILD_CERTIFICATE_BASE64: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
+          P12_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
         run: |
-          xcodebuild clean build \
-            ${{ inputs.workspace != '' && format('-workspace {0}', inputs.workspace) || format('-project {0}', inputs.project) }} \
-            -scheme ${{ inputs.scheme }}-macOS \
-            -configuration Release \
-            -destination 'platform=macOS' \
-            | xcpretty
-
+          CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+          KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+          
+          echo -n "$BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+          
+          security create-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+          security unlock-keychain -p "$KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+          security import $CERTIFICATE_PATH -P "$P12_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+          security list-keychain -d user -s $KEYCHAIN_PATH
+      
+      - name: Archive
+        run: |
+          xcodebuild archive \
+            -project "${{ inputs.xcode-project }}" \
+            -scheme "${{ inputs.scheme }}" \
+            -configuration "${{ inputs.configuration }}" \
+            -archivePath $RUNNER_TEMP/App.xcarchive
+      
+      - name: Upload to TestFlight
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
+        run: |
+          API_KEY_PATH=$RUNNER_TEMP/AuthKey_$API_KEY_ID.p8
+          echo -n "$API_KEY_BASE64" | base64 --decode -o $API_KEY_PATH
+          
+          xcrun altool --upload-app \
+            -f $RUNNER_TEMP/export/*.ipa \
+            -t ios \
+            --apiKey $API_KEY_ID \
+            --apiIssuer $API_ISSUER_ID
